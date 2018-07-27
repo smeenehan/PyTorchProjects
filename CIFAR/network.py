@@ -2,7 +2,35 @@ import torch
 import torch.nn as nn
 
 class ResNeXt(nn.Module):
+    """Implement a residual deep neural network with aggregated transformations.
 
+    Stacks multiple stages of residual blocks, with a variable number of
+    blocks per stage, with each block defined by the ResNeXtBlock class. We 
+    always start with a 3x3 convolution expanding to the initial number of channels, 
+    and end with a global average pool followed by a fully connected layer.
+
+    Strided convolution is used to downsample by a factor of two during the first
+    block of each stage after the first (total downsampling of 2^(N_stages-1)).
+    The number of channels in the middle of each residual block grows by a factor
+    of two each stage (starting from the initial channel number), and the output
+    number of channels is always 4x the mid channel number. For more details see
+    ResNeXtBlock.
+
+    Parameters
+    ----------
+    input_shape : tuple
+        Shape of the inputs, in CHW format.
+    init_channels : int
+        Number of channels in the initial convolutional layer.
+    blocks_per_stage : tuple of ints
+        Number of residual blocks for each stage. Total number of stages is the 
+        length of this tuple.
+    groups : int
+        Number of groups into which to separate the intermediate convolutions
+        in the residual blocks ('cardinality', in the original paper).
+    num_classes : int
+        Number of output classes.
+    """
     def __init__(self, input_shape, init_channels, blocks_per_stage, groups, 
                  num_classes):
         super().__init__()
