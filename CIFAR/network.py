@@ -34,7 +34,8 @@ class ResNeXt(nn.Module):
     def __init__(self, input_shape, init_channels, blocks_per_stage, groups, 
                  num_classes):
         super().__init__()
-        self.conv_init = nn.Conv2d(input_shape[0], init_channels, 3, bias=False)
+        self.conv_init = nn.Conv2d(input_shape[0], init_channels, 3, 
+                                   padding=1, bias=False)
         self.blocks = nn.ModuleList()
         input_channels = init_channels
         for stage_idx, num_blocks in enumerate(blocks_per_stage):
