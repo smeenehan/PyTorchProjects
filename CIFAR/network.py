@@ -53,7 +53,7 @@ class ResNeXt(nn.Module):
                 input_channels = output_channels
         self.bn = nn.BatchNorm2d(output_channels)
         downsample = 2**(len(blocks_per_stage)-1)
-        self.pool = nn.AvgPool2d((input_shape[1]/downsample, input_shape[2]/downsample))
+        self.pool = nn.AvgPool2d((input_shape[1]//downsample, input_shape[2]//downsample))
         self.output_channels = output_channels
         self.fc = nn.Linear(output_channels, num_classes, bias=False)
 
