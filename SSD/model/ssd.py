@@ -149,6 +149,7 @@ def VGG16_backbone(pretrained=False):
     """VGG-16 network, truncated at the conv5_3 layer, and split into 
     multiple Sequential segments to get sources from intermediate layers"""
     base = vgg16(pretrained=pretrained)
+    base.features[16].ceil_mode = True # third MaxPool needs to be ceil_mode to give dimensions from SSD paper for 300x300 input
     backbone = [base.features[:23]] # source output at conv4_3
 
     """Final MaxPool modified, fc6/7 converted to conv (see SSD paper)"""
