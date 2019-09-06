@@ -4,7 +4,9 @@ from math import ceil, floor
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.functional import softmax
 from torchvision.models import vgg16
+from torchvision.ops import nms
 
 MIN_SCALE = 0.2
 MAX_SCALE = 0.9
@@ -37,7 +39,7 @@ class SSD(nn.Module):
         """Head network which will convert the multiple sources to per-pixel sets
         of bounding box offsets and class predictions. We will build this as we go, since
         it's most easily determined by tracing a dummy tensor through the layers"""
-        self.loc_layers = nn.ModuleList()
+        self.offset_layers = nn.ModuleList()
         self.class_layers = nn.ModuleList()
 
         """Trace through the backbone, adding the appropriate head layers and priors as necessary,
@@ -52,7 +54,7 @@ class SSD(nn.Module):
                 x = layer(x)
                 C_out = x.shape[1]
                 map_sizes.append(x.shape[2])
-                self.loc_layers.append(
+                self.offset_layers.append(
                     nn.Conv2d(C_out, num_boxes*4, 3, padding=1)
                 )
                 self.class_layers.append(
@@ -70,7 +72,7 @@ class SSD(nn.Module):
                 x = layer(x)
                 C_out = x.shape[1]
                 map_sizes.append(x.shape[2])
-                self.loc_layers.append(
+                self.offset_layers.append(
                     nn.Conv2d(C_out, num_boxes*4, 3, padding=1)
                 )
                 self.class_layers.append(
@@ -96,22 +98,21 @@ class SSD(nn.Module):
             x = layer(x)
             sources.append(x)
 
-        locs, classes = [], []
-        for (x, l, c) in zip(sources, self.loc_layers, self.class_layers):
+        offsets, classes = [], []
+        for (x, l, c) in zip(sources, self.offset_layers, self.class_layers):
             # Note the call to contiguous, so that we can use view() to reshape w/out copying
-            locs.append(l(x).permute(0, 2, 3, 1).contiguous())
+            offsets.append(l(x).permute(0, 2, 3, 1).contiguous())
             classes.append(c(x).permute(0, 2, 3, 1).contiguous())
 
-        locs = torch.cat([x.view(x.size(0), -1) for x in locs], 1)
+        offsets = torch.cat([x.view(x.size(0), -1) for x in offsets], 1)
         classes = torch.cat([x.view(x.size(0), -1) for x in classes], 1)
-        if self.training:
-            output = (locs.view(locs.size(0), -1, 4),
-                      classes.view(classes.size(0), -1, self.num_classes),
-                      self.default_boxes)
-        else:
-            output = None
+        output = (offsets.view(offsets.size(0), -1, 4),
+                  classes.view(classes.size(0), -1, self.num_classes),
+                  self.default_boxes)
+        if not self.training:
+            output = get_detections(output[0], softmax(output[1], dim=-1),
+                                    output[2])
         return output
-
 
 def build_extra(input_shape):
     """Extra layers after the backbone, split into multiple Sequential
@@ -175,6 +176,67 @@ def default_boxes(image_size, feature_map_size, source_num, max_source,
         boxes += [center_x, center_y, np.sqrt(scale*large_scale), np.sqrt(scale*large_scale)]
         for ratio in ASPECTS[:num_boxes-2]:
            boxes += [center_x, center_y, scale*np.sqrt(ratio), scale/np.sqrt(ratio)]
+    return boxes
+
+def get_detections(offsets, scores, default_boxes, max_num=200, nms_thresh=0.45):
+    """Get detection boxes from box predictions and default boxes.
+
+    Use non-max suppression per class for boxes above a confidence 
+    threshold, up to a maximum number of predictions.
+
+    Parameters
+    ----------
+    offsets : Tensor, shape [batch, num_boxes, 4]
+        Bounding box offsets, in Delta[cx, cy, log(w/w_0), log(h/h_0)] format.
+    scores : Tensor, shape [batch, num_boxes, num_classes].
+        Scores for each class, on (0, 1) interval, 0 is assumed to be background.
+    default_boxes : Tensor, shape [num_boxes, 4]
+        Default bounding boxes, in (cx, cy, w_0, h_0) form.
+    max_num : int
+        Maximum number of detections per-class in an image.
+    nms_thresh : float
+        Overlap threshold used by non-max suppression algorithm.
+    Returns
+    -------
+    Tensor, shape [batch_size, num_classes, max_num, 5]
+        Final set of proposed bounding boxes per class, all in (score, x1, y1, x2, y2) format,
+        sorted on a per-class basis by score (descending). Each class is zero-padded if we have
+        fewer than max_num predictions.
+    """
+    batch_size, num_boxes = offsets.shape[0], default_boxes.shape[0]
+    num_classes = scores.shape[-1]
+    output = torch.zeros(batch_size, num_classes, max_num, 5)
+
+    for idx in range(batch_size):
+        boxes = offsets_to_boxes(offsets[idx], default_boxes)
+        for jdx in range(1, num_classes):
+            class_scores = scores[idx, :, jdx]
+            box_inds = nms(boxes, class_scores, nms_thresh)
+            count = box_inds.shape[0]
+            if count>max_num:
+                box_inds = box_inds[:max_num]
+                count = max_num
+            top_boxes = boxes[box_inds[:count]]
+            top_scores = class_scores[box_inds[:count]][:, None]
+            output[idx, jdx, :count] = torch.cat([top_scores, top_boxes], 1)
+    
+    flat = output.contiguous().view(batch_size, -1, 5)
+    _, inds = flat[:, :, -1].sort(1, descending=True)
+    _, rank = inds.sort(1)
+    flat[(rank<TOP_K).unsqueeze(-1).expand_as(flat)].fill_(0)
+    return output
+
+
+def offsets_to_boxes(offsets, default_boxes):
+    """Take a set of offsets, defined as Delta[cx, cy, log(w/w_0), log(h/h_0)], 
+    and a set of default boxes, in (cx, cy, w_0, h_0) format, and return the 
+    corresponding set of bounding boxes in (x1, y1, x2, y2) format"""
+    boxes = torch.cat([
+        default_boxes[:, :2]+offsets[:, :2],
+        default_boxes[:, 2:]+torch.exp(offsets[:, 2:])
+        ], 1)
+    boxes[:, :2] -= boxes[:, 2:]/2
+    boxes[:, 2:] += boxes[:, 2:]
     return boxes
 
 #def fc_to_conv(fc, C_in, C_out, )
