@@ -223,7 +223,7 @@ def get_detections(offsets, scores, default_boxes, max_num=200, nms_thresh=0.45)
     flat = output.contiguous().view(batch_size, -1, 5)
     _, inds = flat[:, :, -1].sort(1, descending=True)
     _, rank = inds.sort(1)
-    flat[(rank<TOP_K).unsqueeze(-1).expand_as(flat)].fill_(0)
+    flat[(rank<max_num).unsqueeze(-1).expand_as(flat)].fill_(0)
     return output
 
 
